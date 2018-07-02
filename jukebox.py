@@ -39,6 +39,7 @@
 
 import RPi.GPIO as GPIO
 from RPLCD import i2c, gpio
+import MFRC522
 import time
 import subprocess
 from threading import Thread, Lock
@@ -55,6 +56,29 @@ media['tag-01'] = 'Bibi Blocksberg'
 media['tag-02'] = u'Benjamin Blümchen'
 media['tag-03'] = 'Kinderlieder'
 
+uid_to_tag = {}
+uid_to_tag['176,223,243,121'] = 'tag-01'
+uid_to_tag['227,237,212,28'] = 'tag-02'
+
+ping_sound = 'ping.mp3'
+
+# via button sequences specific "hidden" functions can be triggered
+PLAY_PAUSE = 0
+PREV = 1
+NEXT = 2
+VOLUME_DOWN = 3
+VOLUME_UP = 4
+
+# sequence of recently pressed buttons
+button_press_sequence = []
+
+# sequence for switching to next directory
+sequence_next_dir = [PREV, PLAY_PAUSE, NEXT]
+
+# sequence for disabling/enabling display
+sequence_display = [VOLUME_DOWN, VOLUME_UP, VOLUME_DOWN, VOLUME_UP]
+
+
 # current (and initial) start media directory 
 media_current_dir_index = 0
 
@@ -64,11 +88,9 @@ gpio_prev=27		# green button
 gpio_next=17		# yellow button
 gpio_volume_up=23	# blue button
 gpio_volume_down=24	# white button
-gpio_onoff=7		# power on/off button
 
 # configure buttons
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(gpio_onoff, GPIO.IN,pull_up_down=GPIO.PUD_UP)
 GPIO.setup(gpio_play_pause, GPIO.IN,pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(gpio_prev, GPIO.IN,pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(gpio_next, GPIO.IN,pull_up_down=GPIO.PUD_DOWN)
@@ -87,6 +109,10 @@ display_initial[1] = '* * Jukebox  * *'
 options = {}
 lcd = i2c.CharLCD('PCF8574', 0x3f, port=1, charmap='A00', cols=16, rows=2, expander_params=options)
 
+# RFID reader object
+MIFAREReader = MFRC522.MFRC522()
+rfid_reader_running = True
+
 # display related variables
 display_current = list(display_initial)
 display_current_lock = Lock()
@@ -99,33 +125,24 @@ display_previous = list(display_current) # in case the display temporarily shows
 										 # the display before showing the status
 										 # informations
 display_previous_scrolling_status = display_scrolling_enabled
+display_sleep=0.2
 
 # lock for accessing the variable lcd
 lcd_lock = Lock()
+
+# lock for performing a sequence of operations with the mpc command
+# lock the variables media_current_dir_index, playing and sequences of calls to mpc
+# that should better not be "interrupted"
+mpc_lock = Lock()
 
 # list of threads created during execution
 threads = []
 
 short_msg_time = 1500 # how long to short info messages (in ms)
-show_previous_timestamp = -1 # if set to a positive number display the contents of the previous display again
+show_previous_timestamp = -1 # if set to a positive number display the contents
+                             # of the previous display again
 
 playing = False
-
-# via button sequences specific "hidden" functions can be triggered
-PLAY_PAUSE = 0
-PREV = 1
-NEXT = 2
-VOLUME_DOWN = 3
-VOLUME_UP = 4
-
-# sequence of recently pressed buttons
-button_press_sequence = []
-
-# sequence for switching to next directory
-sequence_next_dir = [PREV, PLAY_PAUSE, NEXT]
-
-# sequence for disabling/enabling display
-sequence_display = [VOLUME_DOWN, VOLUME_UP, VOLUME_DOWN, VOLUME_UP]
 
 ########################################################################
 # FUNCTIONS
@@ -229,56 +246,44 @@ def check_and_show_previous():
 		set_display_scrolling(display_previous_scrolling_status)
 
 
-# update the current contents of the LCD with the currently playing track
-def display_thread_callback():
-	global display_running
-	global display_current
-	global display_current_lock
-	global show_previous_timestamp
-
-	display_framebuffer = ['','']
-	
-	while display_running:
-
-		check_and_show_previous()
-		if not display_scrolling_enabled:
-			write_to_lcd(display_current)
-			continue
-		
-		# scroll the second row of the LCD
-		for i in range(len(display_current[1])-16+1):
-
-			# check whether to show the previous display contents again
-			check_and_show_previous()
-
-			# note that the scrolling may be disabled while it is running
-			if not display_scrolling_enabled:
-				write_to_lcd(display_current)
-				continue
-
-			display_current_lock.acquire()
-			display_framebuffer[0] = display_current[0]
-			display_framebuffer[1] = display_current[1][i:i+16]
-			display_current_lock.release()
-			write_to_lcd(display_framebuffer)
-			time.sleep(0.2)
+# convert the given string to unicode string (if it not already is a unicode string)
+def to_unicode(str):
+	text = str
+	try:
+		text = unicode(str, "utf-8")
+	except TypeError:
+		return text
+	return text
 
 
-# update the contents of display_current to currently running track
+# update the contents of display_current (the array, not the display itself) 
+# to the currently running track
 def update_display_current(display_title):
 	global display_current_lock
+	global mpc_lock
 
 	title = ''
 	if display_title:
 		cmd="mpc current | head -1"
-		title=subprocess.check_output(cmd, shell=True)
+		try:
+			mpc_lock.acquire()
+			title=subprocess.check_output(cmd, shell=True)
+		finally:
+			mpc_lock.release()
 
 	# if no track is selected do not change the display contents
 	if not title:
 		return
 
 	# get information about current track
-	directory = media[media_list[media_current_dir_index]]
+	try:
+		mpc_lock.acquire()
+		directory = media[media_list[media_current_dir_index]]
+	finally:
+		mpc_lock.release()
+
+	directory = to_unicode(directory)
+	title = to_unicode(title)
 
 	# update display_current
 	display_current_lock.acquire()
@@ -323,20 +328,27 @@ def sequences_match(long_list, short_list):
 def matching_sequence_found():
 	global display_enabled
 	global media_current_dir_index
+	global button_press_sequence
 	if sequences_match(button_press_sequence, sequence_next_dir):
 		print('Sequence found: change to next directory')
+		play_ping_sound()
 		button_press_sequence[:] = []
-		media_current_dir_index = (media_current_dir_index + 1) % len(media_list)
-		subprocess.Popen(["mpc", "stop"])
-		playing = False
-		subprocess.Popen(["mpc", "clear"])
-		subprocess.Popen(["mpc", "update"])
-		subprocess.Popen(["mpc", "add", media_list[media_current_dir_index]])
+		try:
+			mpc_lock.acquire();
+			media_current_dir_index = (media_current_dir_index + 1) % len(media_list)
+			subprocess.Popen(["mpc", "stop"])
+			playing = False
+			subprocess.Popen(["mpc", "clear"])
+			subprocess.Popen(["mpc", "update"])
+			subprocess.Popen(["mpc", "add", media_list[media_current_dir_index]])
+		finally:
+			mpc_lock.release();
 		update_display_current(False)
 		return True
 
 	if sequences_match(button_press_sequence, sequence_display):
 		print('Sequence found: enable/disable display')
+		play_ping_sound()
 		button_press_sequence[:] = []
 		if display_enabled:
 			# disable display
@@ -359,6 +371,9 @@ def matching_sequence_found():
 		return True
 	return False
 
+def play_ping_sound():
+	subprocess.Popen(["mpg123", "-q", ping_sound])
+
 def shutdown():
 	display_enabled = False
 	lcd_lock.acquire()
@@ -367,27 +382,128 @@ def shutdown():
 		lcd.backlight_enabled = False
 	finally:
 		lcd_lock.release()
+
+def get_current_media_dir(dir_name):
+	i = 0
+	for item in media_list:
+		if item == dir_name:
+			return i
+		i = i+1
+	return -1
 	
+
+########################################################################
+# THREAD FUNCTIONS
+########################################################################
+
+# function run by the separate display thread
+# update the current contents of the LCD with the currently playing track
+def display_thread_callback():
+	global display_running
+	global display_current
+	global display_current_lock
+	global show_previous_timestamp
+
+	display_framebuffer = ['','']
+	
+	while display_running:
+
+		check_and_show_previous()
+		if not display_scrolling_enabled:
+			write_to_lcd(display_current)
+			continue
+		
+		# scroll the second row of the LCD
+		for i in range(len(display_current[1])-16+1):
+
+			# check whether to show the previous display contents again
+			check_and_show_previous()
+
+			# note that the scrolling may be disabled while it is running
+			if not display_scrolling_enabled:
+				write_to_lcd(display_current)
+				continue
+
+			display_current_lock.acquire()
+			display_framebuffer[0] = display_current[0]
+			display_framebuffer[1] = display_current[1][i:i+16]
+			display_current_lock.release()
+			write_to_lcd(display_framebuffer)
+			time.sleep(display_sleep)
+
+# function run by the thread that handles reading RFID tags,
+# whenever a known tag is recognized the player switches
+# to the directory associated with the tag and selects the
+# first song to be played next
+def rfid_thread_callback():
+	global rfid_reader_running
+	global uid_to_tag
+	global media
+	global media_list
+	global playing
+	global media_current_dir_index
+	global button_press_sleep_time
+	global MIFAREReader
+
+	while rfid_reader_running:
+		(status,TagType) = MIFAREReader.MFRC522_Request(MIFAREReader.PICC_REQIDL)
+		if status == MIFAREReader.MI_OK:
+			print "Karte gelesen"
+
+		(status,uid) = MIFAREReader.MFRC522_Anticoll()
+		if status == MIFAREReader.MI_OK:
+			uid_str = str(uid[0])+","+str(uid[1])+","+str(uid[2])+","+str(uid[3])
+			if uid_str == "0,0,0,0":
+				continue
+			elif uid_str not in uid_to_tag.keys():
+				print "Karte mit dieser UID nicht von der Jukebox erfasst"
+			else:
+				print "UID: "+uid_str
+				print "Wechsle in Ordner "+uid_to_tag[uid_str]+" ("+media[uid_to_tag[uid_str]]+")"
+				play_ping_sound()
+				try:
+					mpc_lock.acquire();
+					subprocess.Popen(["mpc", "-q", "stop"])
+					playing_old = playing
+					playing = False
+					subprocess.Popen(["mpc", "-q", "clear"])
+					subprocess.Popen(["mpc", "-q", "update"])
+					media_current_dir_index = get_current_media_dir(uid_to_tag[uid_str])
+					subprocess.Popen(["mpc", "-q", "add", media_list[media_current_dir_index]])
+					if playing_old:
+						subprocess.Popen(["mpc", "-q", "play"])
+					else:
+						# hack for selecting first song (required for updating display)
+						subprocess.Popen(["mpc", "-q", "play"])
+						subprocess.Popen(["mpc", "-q", "pause"])
+					playing = playing_old
+				finally:
+					mpc_lock.release();
+				update_display_current(True)
+				time.sleep(button_press_sleep_time)
+
 
 ########################################################################
 # MAIN
 ########################################################################
 
-# write initial text to display
-display_thread = Thread(target=display_thread_callback)
-display_thread.start()
-threads += [display_thread]
-
 # initialize audio player
+mpc_lock.acquire();
 subprocess.Popen(["mpc", "clear"])
 subprocess.Popen(["mpc", "update"])
 subprocess.Popen(["mpc", "add", media_list[media_current_dir_index]])
 subprocess.Popen(["mpc", "repeat", "on"])
+mpc_lock.release();
+
+# start display thread 
+display_thread = Thread(target=display_thread_callback)
+display_thread.start()
+
+# start RFID thread
+rfid_thread = Thread(target=rfid_thread_callback)
+rfid_thread.start()
 
 while True:
-	if GPIO.input(gpio_onoff) == False:
-		print('On/Off pressed')
-		shutdown()
 
 	if GPIO.input(gpio_play_pause) == True:
 		button_press_sequence += [PLAY_PAUSE]
@@ -395,13 +511,21 @@ while True:
 			continue
 		if playing:
 			print('Pause')
-			subprocess.Popen(["mpc", "-q", "pause"])
-			playing = False
+			try:
+				mpc_lock.acquire();
+				subprocess.Popen(["mpc", "-q", "pause"])
+				playing = False
+			finally:
+				mpc_lock.release();
 			set_display_scrolling(False)
 		else:
 			print('Play')
-			subprocess.Popen(["mpc", "-q", "play"])
-			playing = True
+			try:
+				mpc_lock.acquire();
+				subprocess.Popen(["mpc", "-q", "play"])
+				playing = True
+			finally:
+				mpc_lock.release();
 			set_display_scrolling(True)
 
 		update_display_current(True)
@@ -412,7 +536,11 @@ while True:
 		button_press_sequence += [NEXT]
 		if matching_sequence_found():
 			continue
-		subprocess.Popen(["mpc", "-q", "next"])
+		try:
+			mpc_lock.acquire();
+			subprocess.Popen(["mpc", "-q", "next"])
+		finally:
+			mpc_lock.release();
 		update_display_current(True)
 		time.sleep(button_press_sleep_time)
 
@@ -421,7 +549,11 @@ while True:
 		button_press_sequence += [PREV]
 		if matching_sequence_found():
 			continue
-		subprocess.Popen(["mpc", "-q", "prev"])
+		try:
+			mpc_lock.acquire();
+			subprocess.Popen(["mpc", "-q", "prev"])
+		finally:
+			mpc_lock.release();
 		update_display_current(True)
 		time.sleep(button_press_sleep_time)
 
@@ -443,7 +575,8 @@ while True:
 
 # join all previously started threads
 display_running = False
-for thread in threads:
-	thread.join()
+display_thread.join()
+rfid_reader_running = False
+rfid_thread.join()
 
 GPIO.cleanup()
