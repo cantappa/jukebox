@@ -466,11 +466,8 @@ def update_display_current(update_display_title):
 	finally:
 		display_current_lock.release()
 
-	print("update_display_current 1")
 	set_display_thread_paused(UNPAUSE)
-	print("update_display_current 2")
 	trigger_display_event() # fire event for waking up display thread
-	print("update_display_current 3")
 
 	# Store the currently running track in order to periodically update it with mpc current.
 	# This is required since the track may change by itself without a button press happening.
@@ -495,7 +492,7 @@ def print_button_press_sequence(sequence):
 			sequence_str += 'VOLUME_UP'
 		if elem == VOLUME_DOWN:
 			sequence_str += 'VOLUME_DOWN'
-	print(sequence_str)
+	my_print(sequence_str)
 
 
 # compares the last elements of the first list with all elements of the second list,
@@ -627,8 +624,6 @@ def display_thread_callback():
 		else:
 			display_event.wait()
 			display_event.clear()
-
-		print("display current: "+str(display_current))
 
 		check_and_show_previous()
 		if not display_scrolling_enabled:
