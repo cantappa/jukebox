@@ -647,12 +647,14 @@ def display_thread_callback():
 				write_to_lcd(display_current)
 				continue
 
+			# get current contents of display array
 			try:
 				display_current_lock.acquire()
 				display_framebuffer[0] = display_current[0]
 				display_framebuffer[1] = display_current[1][i:i+16]
 			finally:
 				display_current_lock.release()
+
 			write_to_lcd(display_framebuffer)
 			time.sleep(display_sleep)
 
