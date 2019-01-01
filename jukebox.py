@@ -924,9 +924,6 @@ def volume_down_callback(channel):
 # MAIN
 ########################################################################
 
-# separate logs of different runs of this script from each other with this separator
-my_print("#####################################################################")
-
 # define button callbacks
 GPIO.add_event_detect(gpio_play_pause,GPIO.RISING, play_pause_callback)
 GPIO.add_event_detect(gpio_next,GPIO.RISING, next_callback)
