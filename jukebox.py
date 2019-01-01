@@ -52,6 +52,8 @@ import json
 ########################################################################
 # CONFIGURATION
 ########################################################################
+GPIO.setwarnings(False)
+
 reload(sys)
 sys.setdefaultencoding('utf8')
 
@@ -124,6 +126,11 @@ display_initial = ['', '']
 display_initial[0] = '* * Paulas * * *'
 display_initial[1] = '* * Jukebox  * *'
 
+# the second row of the display is scrolled if it is larger than
+# the display width; in this case this separator is used between
+# the end of the end and the begin of the text to show
+title_separator =  " * "
+
 # show this when the jukebox has been stopped
 jukebox_off_text = ["  Jukebox ist   ", " ausgeschaltet  "]
 
@@ -141,6 +148,7 @@ if rfid_enabled:
 	rfid_reader_running = True
 
 # display related variables
+display_width = 16							# number of characters the display can show
 display_enabled = True						# whether the display is used 
 display_running = True						# whether the display thread is running
 display_scrolling_always_disabled = False	# whether to deactivate scrolling of scrolling, 
@@ -343,6 +351,19 @@ def get_display_thread_paused():
 	finally:
 		display_thread_paused_lock.release()
 	return paused
+
+
+# threadsafe getting of display array contents
+def get_display_current():
+	display_framebuffer = ['','']
+	try:
+		display_current_lock.acquire()
+		display_framebuffer[0] = display_current[0]
+		display_framebuffer[1] = display_current[1]
+	finally:
+		display_current_lock.release()
+	return display_framebuffer
+
 
 # handle a button press, i.e.:
 # * increase/decrease volume
@@ -590,15 +611,15 @@ def display_thread_callback():
 	if not display_enabled:
 		shutdown_display()
 		return
-
-	display_framebuffer = ['','']
 	
 	while display_running:
-		
+
+
 		paused = get_display_thread_paused()
-		if display_thread_paused:
+		if paused:
 			time.sleep(0.1)
 			continue
+		
 
 		# Triggering the display event may have been missed.
 		# This is the case, if the display event is triggered while 
@@ -625,38 +646,74 @@ def display_thread_callback():
 			display_event.wait()
 			display_event.clear()
 
+
 		check_and_show_previous()
 		if not display_scrolling_enabled:
 			write_to_lcd(display_current)
 			continue
 
-		# scroll the second row of the LCD
-		for i in range(len(display_current[1])-16+1):
-			try:
-				display_thread_paused_lock.acquire()
-				if display_thread_paused:
-					continue
-			finally:
-				display_thread_paused_lock.release()
+		#
+		# Show contents of display array on the display.
+		# If the text of the second row is longer than the
+		# display width, then the text is scrolled over the display.
+		#
 
-			# check whether to show the previous display contents again
-			check_and_show_previous()
+		display_framebuffer = get_display_current()
 
-			# note that the scrolling may be disabled while it is running
-			if not display_scrolling_enabled:
-				write_to_lcd(display_current)
+		# if text fits on the display or if the scrolling is disabled, just print the text
+		if len(display_framebuffer[1]) <= display_width or not display_scrolling_enabled:
+				write_to_lcd(display_framebuffer)
 				continue
+		
+		# iterate over text of the second row
+		i = 0
+		paused = False
+		display_contents_changed = True
+		display_current_copy = get_display_current()
+		while not paused:
 
-			# get current contents of display array
-			try:
-				display_current_lock.acquire()
-				display_framebuffer[0] = display_current[0]
-				display_framebuffer[1] = display_current[1][i:i+16]
-			finally:
-				display_current_lock.release()
 
-			write_to_lcd(display_framebuffer)
+			# # if the display contents have changed since the last iteration, begin at position 0 
+			# display_contents_before = get_display_current()
+			# print("display_contents_before="+str(display_contents_before))
+			# print("display_current_copy="+str(display_current_copy))
+			# if(display_contents_before != display_current_copy):
+			# 	i = 0
+			
+			# check whether to show the previous display contents again (may update display_current)
+			display_contents_before = get_display_current()
+			print("display_contents_before="+str(display_contents_before))
+			check_and_show_previous()
+			display_current_copy = get_display_current()
+			print("display_current_copy="+str(display_current_copy))
+			if i != 0 and display_contents_before != display_current_copy: # TODO check if array comparsion works
+				i = 0
+
+
+			# do not scroll short texts or if the scrolling is disabled in general
+			if len(display_current_copy[1]) <= display_width or not display_scrolling_enabled:
+				write_to_lcd(display_current_copy)
+				continue # go back to waiting for display event
+
+			# text is too long => scroll it
+			text_length = len(display_current_copy[1] + title_separator)
+			second_row = display_current_copy[1] + title_separator + display_current_copy[1]
+
+			#
+			# Example with an 8 characters display: 
+			#
+			# s c r o l l   t e x t   *   s c r o l l
+			#    |i _ _ _ _ _ _ _|_ _ _ _ _ _ _ _
+			#     0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
+			#
+
+			# update LCD
+			display_current_copy[1] = second_row[i:i+display_width]
+			write_to_lcd(display_current_copy)
+
+			i = (i+1) % text_length
 			time.sleep(display_sleep)
+			paused = get_display_thread_paused()
 
 # function run by the thread that handles reading RFID tags,
 # whenever a known tag is recognized the player switches
@@ -866,6 +923,9 @@ def volume_down_callback(channel):
 ########################################################################
 # MAIN
 ########################################################################
+
+# separate logs of different runs of this script from each other with this separator
+my_print("#####################################################################")
 
 # define button callbacks
 GPIO.add_event_detect(gpio_play_pause,GPIO.RISING, play_pause_callback)
