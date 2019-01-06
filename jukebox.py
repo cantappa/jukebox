@@ -117,8 +117,8 @@ prev_callback_next = time.time()
 prev_callback_volume_up = time.time()
 prev_callback_volume_down = time.time()
 
-# sleep time after a button press
-button_press_sleep_time=0.3
+# sleep time after a button press (do not recognize a button press before 0.3s)
+button_press_sleep_time=0.5
 volume_button_press_sleep_time=0.3
 
 # initial text at display:
@@ -459,7 +459,8 @@ def update_display_current(update_display_title):
 			title=subprocess.check_output(cmd, shell=True)
 			# remove non-printable characters
 			# source: https://stackoverflow.com/questions/92438/stripping-non-printable-characters-from-a-string-in-python
-			title=''.join([x for x in title if x in string.printable and x != '\n' and x != '\r'])
+			special_chars = "äÄöÖüÜß"
+			title=''.join([x for x in title if(x in string.printable and x != '\n' and x != '\r') or (x in special_chars) ])
 		finally:
 			mpc_lock.release()
 
@@ -682,10 +683,8 @@ def display_thread_callback():
 			
 			# check whether to show the previous display contents again (may update display_current)
 			display_contents_before = get_display_current()
-			print("display_contents_before="+str(display_contents_before))
 			check_and_show_previous()
 			display_current_copy = get_display_current()
-			print("display_current_copy="+str(display_current_copy))
 			if i != 0 and display_contents_before != display_current_copy: # TODO check if array comparsion works
 				i = 0
 
