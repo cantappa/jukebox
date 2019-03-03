@@ -1,0 +1,5 @@
+alias jukebox-start='sudo systemctl start jukebox.service'
+alias jukebox-stop='sudo systemctl stop jukebox.service'
+alias jukebox-restart='sudo systemctl restart jukebox.service'
+alias jukebox-status='sudo systemctl status jukebox.service'
+alias jukebox-log='sudo journalctl -f -u jukebox.service'
