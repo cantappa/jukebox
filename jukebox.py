@@ -45,6 +45,7 @@ import time
 import subprocess
 from threading import Thread, Lock
 import threading
+import logging
 import sys
 import string
 import json
@@ -52,6 +53,10 @@ import json
 ########################################################################
 # CONFIGURATION
 ########################################################################
+
+print("###########################################")
+print("Jukebox startet...")
+
 GPIO.setwarnings(False)
 
 reload(sys)
@@ -63,7 +68,8 @@ this_script_dir = sys.path[0]+"/"
 library_file = this_script_dir+"library.json"
 
 # directory containing the "tag-*" directories which in turn contain the audio files
-media_dir = this_script_dir+"Media/"
+# NOTE: /etc/mpd.conf should contain 'music_directory "/home/pi/Jukebox/Media"'
+media_dir = "/home/pi/Jukebox/Media/"
 
 # will be filled with contents from JSON library
 media_directories = [] # example: ["/home/pi/Jukebox/Media/tag-01", "/home/pi/Jukebox/Media/tag-02"]
@@ -73,7 +79,13 @@ uid_to_tag = {}        # example: { "176,223,243,121" : "tag-01", "64,128,53,131
 # sounds
 ping_sound = this_script_dir+"ping.mp3"				# sound to play when a registered RFID card is recognized 
 													# or a hidden button sequence is pressed	
-startup_sound = this_script_dir+"hallo_paula.mp3"	# sound to play when Jukebox is successfully started and ready for interaction
+# startup_sound = this_script_dir+"hallo_paula.mp3"	# sound to play when Jukebox is successfully started and ready for interaction
+startup_sound = ping_sound
+play_startup_sound = True 							# whether to play the startup sound right after boot
+
+# display status
+PAUSE=1
+UNPAUSE=0
 
 # via button sequences specific "hidden" functions can be triggered
 PLAY_PAUSE = 0
@@ -85,11 +97,11 @@ VOLUME_UP = 4
 # sequence of recently pressed buttons
 button_press_sequence = []
 
-# sequence for switching to next directory
-sequence_next_dir = [PREV, PLAY_PAUSE, NEXT]
-
-# sequence for disabling/enabling display
-sequence_display = [VOLUME_DOWN, VOLUME_UP, VOLUME_DOWN, VOLUME_UP]
+# button press sequences for hidden options,
+# note that the sequences may not overlap
+sequence_next_dir = [PREV, PLAY_PAUSE, PLAY_PAUSE, NEXT] 			# sequence for switching to next directory
+sequence_display = [VOLUME_DOWN, VOLUME_UP, VOLUME_DOWN, VOLUME_UP]	# sequence for disabling/enabling display
+sequence_ip = [PREV, PREV, PREV, PREV, PREV]      					# show the IP address on the display
 
 # current (and initial) start media directory 
 media_current_dir_index = 0
@@ -111,13 +123,15 @@ GPIO.setup(gpio_volume_down, GPIO.IN,pull_up_down=GPIO.PUD_DOWN)
 
 button_callback_lock = Lock()
 
-prev_callback_play_pause = time.time()
-prev_callback_prev = time.time()
-prev_callback_next = time.time()
-prev_callback_volume_up = time.time()
-prev_callback_volume_down = time.time()
+# store timestamp of last handled button press
+now = time.time()
+prev_callback_play_pause = now
+prev_callback_prev = now
+prev_callback_next = now
+prev_callback_volume_up = now
+prev_callback_volume_down = now
 
-# sleep time after a button press (do not recognize a button press before 0.3s)
+# sleep time after a button press (do not recognize a button press before x seconds)
 button_press_sleep_time=0.5
 volume_button_press_sleep_time=0.3
 
@@ -136,7 +150,7 @@ jukebox_off_text = ["  Jukebox ist   ", " ausgeschaltet  "]
 
 # create lcd object
 options = {}
-lcd = i2c.CharLCD('PCF8574', 0x3f, port=1, charmap='A00', cols=16, rows=2, expander_params=options)
+lcd = i2c.CharLCD('PCF8574', 0x27, port=1, charmap='A00', cols=16, rows=2, expander_params=options)
 lcd_lock = Lock()
 
 # RFID reader configuration
@@ -147,21 +161,24 @@ if rfid_enabled:
 	MIFAREReader = MFRC522.MFRC522()
 	rfid_reader_running = True
 
+#-----------------------------------------------------------------------
 # display related variables
+
 display_width = 16							# number of characters the display can show
 display_enabled = True						# whether the display is used 
 display_running = True						# whether the display thread is running
 display_scrolling_always_disabled = False	# whether to deactivate scrolling of scrolling, 
 											# by default the second display line containing the title is scrolled
 display_scrolling_enabled = True			# whether to stop scrolling of second display line,
-											# this is only used for *temporarily* disable the scrolling, 
-											# for instance this is used when showing the volume
+											# this is only used for *temporarily* disabling the scrolling, 
+											# this is used when showing the volume after increasing or decreasing it
+											# or in case the playback has been paused
 display_current = list(display_initial)		# array holding the text to show in display
 display_current_lock = Lock()				# lock access to any display related variables
 display_previous = list(display_current)	# in case the display temporarily shows status information (e.g. volume info)
 											# this variable holds the contents of the display before showing the status
 											# informations
-display_sleep=0.4							# sleep time (in s) for text scrolling,
+display_sleep=0.5							# sleep time (in s) for text scrolling,
 											# this value defines the speed of text scrolling
 											# the larger the value the slower the scrolling
 display_thread_paused = False				# whether the diyplay is interrupted,
@@ -178,17 +195,25 @@ title_changed_observer_running = True		# If enabled an observer thread is run th
 current_track = ""							# holds the currently played track,
 											# updated on according button press, RFID card or by observer thread
 title_changed_observer_sleep=2				# number of seconds to wait until new comparison of currently played track and diplay contents.
-PAUSE=1
-UNPAUSE=0
+
+show_ip_address_on_startup = False			# whether to show the IP address right after booting on display
+no_ip_text = "nicht verbunden"
+enable_volume_info_output = True			# whether to output the new volume on the display on volum button press
+show_volume_change_time_ms = 1500 			# how long to short info messages (in ms)
+show_ip_time_ms = 4500						# how long to show the IP address at the display (in ms)
+show_previous_timestamp = -1				# if set to a positive number, display the contents
+                            				# of the previous display again at this time
+
+
+#-----------------------------------------------------------------------
+# debug output configuration
+
+print_library = False		# print library contents at the beginning to console
+print_button_info = True	# print pressed button to console
+debug_output = True			# whether to enable/disable debug output
+initial_volume = "100" 		# percentage of initial volume
+
 display_previous_scrolling_status = display_scrolling_enabled
-
-# whether to output the new volume on the display on volum button press
-enable_volume_info_output = True
-
-# further debug output options
-print_library = False
-print_button_info = True
-debug_output = True
 
 # lock for performing a sequence of operations with the mpc command
 # lock the variables media_current_dir_index, playing and sequences of calls to mpc
@@ -198,12 +223,8 @@ mpc_lock = Lock()
 # list of threads created during execution
 threads = []
 
-short_msg_time = 1500 # how long to short info messages (in ms)
-show_previous_timestamp = -1 # if set to a positive number display the contents
-                             # of the previous display again
-
+# whether the jukebox is playing a track or it is currently paused
 playing = False
-
 library_loaded = False
 
 # event that can be triggered and causes the display thread to update its contents
@@ -214,9 +235,23 @@ display_event_lock = Lock()
 # FUNCTIONS
 ########################################################################
 
+# get IP of wlan0 interface
+def get_ip_address():
+	cmd = "ip addr show wlan0 | grep -Po 'inet \K[\d.]+'"
+	try:
+		ip = subprocess.check_output(cmd, shell=True)
+	except subprocess.CalledProcessError as e:
+		return no_ip_text
+
+	if ip == "":
+		return no_ip_text
+
+	return ip
+
 # unbuffered printing is required for correctly printing when running this script as systemd service
 def my_print(print_str):
-	print print_str
+	logging.debug(print_str)
+	print "thread"+str(threading.current_thread().ident)+": "+print_str
 	sys.stdout.flush()
 
 def print_button_info(button):
@@ -227,8 +262,30 @@ def debug_output(print_str):
 	if debug_output:
 		my_print(print_str)
 
+# convert the given string to unicode string (if it not already a unicode string)
+def to_unicode(str):
+	text = str
+	try:
+		text = unicode(str, "utf-8")
+	except TypeError:
+		return text
+	return text
+
+# prepare the given text for being displayed on the LCD
+def prepare_for_display(str):
+		# replace ß
+		str=str.replace("ß", "ss")
+
+		# remove non-printable characters
+		# source: https://stackoverflow.com/questions/92438/stripping-non-printable-characters-from-a-string-in-python
+		special_chars = "äÄöÖüÜ"
+		str=''.join([x for x in str if(x in string.printable and x != '\n' and x != '\r') or (x in special_chars) ])
+		
+		return to_unicode(str)
+
 def play_ping_sound():
 	subprocess.Popen(["mpg123", "-q", ping_sound])
+	
 
 # print library contents (library needs to be loaded before)
 def print_library():
@@ -243,8 +300,8 @@ def print_library():
 	my_print("-------------------------------------------")
 	for uid in uid_to_tag:
 			dir_name = uid_to_tag[uid]
-			my_print("Directory: "+ dir_name)
-			my_print("Title: "+media_titles[dir_name])
+			my_print("Ordner: "+ dir_name)
+			my_print("Titel: "+media_titles[dir_name])
 			my_print("UID: "+uid)
 			my_print("-------------------------------------------")
 	
@@ -261,8 +318,9 @@ def load_library():
 	    data_file.close()
 
 	for entry in library_as_json:
+		name = prepare_for_display(entry['name'])
 		media_directories.append(entry['directory'])
-		media_titles[entry['directory']] = entry['name']
+		media_titles[entry['directory']] = name
 		uid_to_tag[entry['uid']] = entry['directory']
 
 	my_print("Bibliothek mit "+str(len(media_titles))+" Einträgen erfolgreich geladen.")
@@ -365,6 +423,42 @@ def get_display_current():
 	return display_framebuffer
 
 
+# Prints the given message for the given number of ms on the display.
+# Remembers the previously shown text and shows that text after
+# duration_in_ms ms has ellapsed.
+def display_short_message(message_row_1, message_row_2, duration_in_ms):
+	global display_current_lock
+	global display_previous
+	global display_previous_scrolling_status
+	global display_current
+	global show_previous_timestamp
+
+	my_print("Zeige Nachricht für "+str(duration_in_ms)+"ms auf dem Display:")
+	my_print(message_row_1)
+	my_print(message_row_2)
+
+	display_current_lock.acquire()
+	try:
+		# only update display_previous if a short message is currently not shown
+		if show_previous_timestamp == -1:
+			display_previous = list(display_current) # need to copy the list in display_current
+			display_previous_scrolling_status = display_scrolling_enabled
+
+		clear_display_current()
+		display_current[0] = message_row_1
+		display_current[1] = message_row_2
+
+		# show previous display contents at this timestamp
+		show_previous_timestamp = duration_in_ms + int(round(time.time() * 1000))
+		set_display_scrolling(False)
+		trigger_display_event()
+
+		set_display_thread_paused(UNPAUSE)
+
+	finally:
+		display_current_lock.release()
+
+
 # handle a button press, i.e.:
 # * increase/decrease volume
 # * pause display thread
@@ -373,14 +467,6 @@ def get_display_current():
 # * unpause display thread
 # * trigger display thread to proceed
 def handle_volume_button_press(text, up):
-	global display_short_msg_thread
-	global display_current
-	global display_current_lock
-	global display_previous
-	global show_previous_timestamp
-	global display_previous_scrolling_status
-	global display_scrolling_enabled
-	global display_event
 
 	if up:
 		subprocess.Popen(["mpc", "-q", "volume", "+2"])
@@ -388,33 +474,16 @@ def handle_volume_button_press(text, up):
 		subprocess.Popen(["mpc", "-q", "volume", "-2"])
 
 	new_volume=get_current_volume()
-	my_print("Neue Lautstärke: "+new_volume)
 
 	if not enable_volume_info_output:
 		return
 
-	# pause display thread
-	set_display_thread_paused(PAUSE)
-
-	# update display contents to show volume info
-	display_current_lock.acquire()
-	try:
-		# only update display_previous if a short message is currently not shown
-		if show_previous_timestamp == -1:
-			display_previous = list(display_current) # need to copy the list in display_current
-			display_previous_scrolling_status = display_scrolling_enabled
-		clear_display_current()
-		display_current[0] = text
-		display_current[1] = u'Lautstärke: '+str(new_volume)+'%'
-		show_previous_timestamp = short_msg_time + int(round(time.time() * 1000))
-		set_display_scrolling(False)
-		trigger_display_event()
-		set_display_thread_paused(UNPAUSE)
-	finally:
-		display_current_lock.release()
-
+	# display new volume at display
+	display_short_message(text, u'Lautstärke: '+str(new_volume)+'%', show_volume_change_time_ms)
+	
 
 # check whether to show the previous display contents again
+# if so: update display array contents
 def check_and_show_previous():
 	global show_previous_timestamp
 	global display_current
@@ -433,16 +502,6 @@ def check_and_show_previous():
 		trigger_display_event()
 
 
-# convert the given string to unicode string (if it not already a unicode string)
-def to_unicode(str):
-	text = str
-	try:
-		text = unicode(str, "utf-8")
-	except TypeError:
-		return text
-	return text
-
-
 # update the contents of display_current (the array, not the display itself) 
 # to the currently running track
 def update_display_current(update_display_title):
@@ -456,11 +515,8 @@ def update_display_current(update_display_title):
 		cmd="mpc current --format %title% | head -1"
 		try:
 			mpc_lock.acquire()
-			title=subprocess.check_output(cmd, shell=True)
-			# remove non-printable characters
-			# source: https://stackoverflow.com/questions/92438/stripping-non-printable-characters-from-a-string-in-python
-			special_chars = "äÄöÖüÜß"
-			title=''.join([x for x in title if(x in string.printable and x != '\n' and x != '\r') or (x in special_chars) ])
+			title = subprocess.check_output(cmd, shell=True)
+			title = prepare_for_display(title)
 		finally:
 			mpc_lock.release()
 
@@ -475,9 +531,6 @@ def update_display_current(update_display_title):
 	finally:
 		mpc_lock.release()
 
-	directory = to_unicode(directory)
-	title = to_unicode(title)
-
 	# update display_current
 	set_display_thread_paused(PAUSE)
 	display_current_lock.acquire()
@@ -487,10 +540,8 @@ def update_display_current(update_display_title):
 		display_current[1] = title
 	finally:
 		display_current_lock.release()
-
 	set_display_thread_paused(UNPAUSE)
 	trigger_display_event() # fire event for waking up display thread
-
 	# Store the currently running track in order to periodically update it with mpc current.
 	# This is required since the track may change by itself without a button press happening.
 	# This in turn happens if a track is finished and automatically the next one in the 
@@ -526,6 +577,8 @@ def sequences_match(long_list, short_list):
 	for i in range(len(short_list)):
 		if short_list[len(short_list)-1-i] != long_list[len(long_list)-1-i]:
 			return False
+
+	my_print("Versteckte Option erkannt: "+str(short_list))
 	return True
 
 
@@ -534,8 +587,18 @@ def matching_sequence_found():
 	global display_enabled
 	global media_current_dir_index
 	global button_press_sequence
+
+	# hidden option: show IP address at display
+	if(sequences_match(button_press_sequence, sequence_ip)):
+		my_print('Versteckte Option: Zeige IP-Addresse')
+		play_ping_sound()
+		button_press_sequence[:] = []
+		display_short_message("IP Adresse:", get_ip_address(), show_ip_time_ms)
+		return True
+
+	# hidden option: switch to next directory
 	if sequences_match(button_press_sequence, sequence_next_dir):
-		my_print('Versteckte Option aktiviert: wechle in nächsten Ordner')
+		my_print('Versteckte Option aktiviert: wechsle in nächsten Ordner')
 		play_ping_sound()
 		button_press_sequence[:] = []
 		try:
@@ -551,6 +614,7 @@ def matching_sequence_found():
 		update_display_current(True) # TODO was False, check if it still works	
 		return True
 
+	# hidden option: enable/disable display
 	if sequences_match(button_press_sequence, sequence_display):
 		play_ping_sound()
 		button_press_sequence[:] = []
@@ -593,7 +657,7 @@ def get_current_media_dir(dir_name):
 			return i
 		i = i+1
 	return -1
-	
+
 
 ########################################################################
 # THREAD FUNCTIONS
@@ -612,16 +676,12 @@ def display_thread_callback():
 	if not display_enabled:
 		shutdown_display()
 		return
-	
+
 	while display_running:
-
-
 		paused = get_display_thread_paused()
 		if paused:
 			time.sleep(0.1)
 			continue
-		
-
 		# Triggering the display event may have been missed.
 		# This is the case, if the display event is triggered while 
 		# the display thread (that executes this function) is currently 
@@ -636,7 +696,6 @@ def display_thread_callback():
 			skip_wait = display_event_skip_wait
 		finally:
 			display_event_skip_wait_lock.release()
-
 		if skip_wait:
 			try:
 				display_event_skip_wait_lock.acquire()
@@ -646,8 +705,6 @@ def display_thread_callback():
 		else:
 			display_event.wait()
 			display_event.clear()
-
-
 		check_and_show_previous()
 		if not display_scrolling_enabled:
 			write_to_lcd(display_current)
@@ -672,14 +729,6 @@ def display_thread_callback():
 		display_contents_changed = True
 		display_current_copy = get_display_current()
 		while not paused:
-
-
-			# # if the display contents have changed since the last iteration, begin at position 0 
-			# display_contents_before = get_display_current()
-			# print("display_contents_before="+str(display_contents_before))
-			# print("display_current_copy="+str(display_current_copy))
-			# if(display_contents_before != display_current_copy):
-			# 	i = 0
 			
 			# check whether to show the previous display contents again (may update display_current)
 			display_contents_before = get_display_current()
@@ -688,12 +737,10 @@ def display_thread_callback():
 			if i != 0 and display_contents_before != display_current_copy: # TODO check if array comparsion works
 				i = 0
 
-
 			# do not scroll short texts or if the scrolling is disabled in general
 			if len(display_current_copy[1]) <= display_width or not display_scrolling_enabled:
 				write_to_lcd(display_current_copy)
 				continue # go back to waiting for display event
-
 			# text is too long => scroll it
 			text_length = len(display_current_copy[1] + title_separator)
 			second_row = display_current_copy[1] + title_separator + display_current_copy[1]
@@ -709,7 +756,6 @@ def display_thread_callback():
 			# update LCD
 			display_current_copy[1] = second_row[i:i+display_width]
 			write_to_lcd(display_current_copy)
-
 			i = (i+1) % text_length
 			time.sleep(display_sleep)
 			paused = get_display_thread_paused()
@@ -754,15 +800,23 @@ def rfid_thread_callback():
 					media_current_dir_index = get_current_media_dir(uid_to_tag[uid_str])
 					subprocess.Popen(["mpc", "-q", "add", media_dir+media_directories[media_current_dir_index]])
 					subprocess.Popen(["mpc", "-q", "play"])
-					playing = True
 				finally:
 					mpc_lock.release();
+
+				set_display_scrolling(True)
+				playing = True
+				set_display_thread_paused(UNPAUSE)
 				update_display_current(True)
 
 
 # check whether current title has changed and in case it has, initiate display update
 def title_changed_observer_callback():
 	while title_changed_observer_running:
+
+		# if the jukebox is not playing, the title cannot change automatically
+		if not playing:
+			continue
+
 		mpc_current_track="mpc current --format %file% | head -1"
 		if mpc_current_track != current_track:
 			update_display_current(True)
@@ -772,26 +826,32 @@ def title_changed_observer_callback():
 #-----------------------------------------------------------------------
 # CALLBACK FUNCTIONS FOR BUTTON PRESSES
 
+# manual handling of prelling (bounce of add_event_detect does not always seem to work)
+def proceed_handling(prev_timestamp, bounce_time):
+	now = time.time()
+	sum = prev_timestamp + bounce_time
+	if now < sum:
+		return False
+	return True
+
 def play_pause_callback(channel):
 
 	try:
 		button_callback_lock.acquire()
-		# TODO put this in a function
+
 		global prev_callback_play_pause
-		stored = prev_callback_play_pause
-		now = time.time()
-		prev_callback_play_pause = now		
-		mysum = stored + button_press_sleep_time
-		if now < mysum:
-			return
+		if not proceed_handling(prev_callback_play_pause, button_press_sleep_time):
+			return 	
+		prev_callback_play_pause = time.time()
 
 		global button_press_sequence
 		global playing
 		button_press_sequence += [PLAY_PAUSE]
 		if matching_sequence_found():
 			return
+
 		if playing:
-			my_print(u'Pause Button gedrückt')
+			my_print(u'>> \"Pause Knopf\" gedrückt')
 			try:
 				mpc_lock.acquire();
 				subprocess.Popen(["mpc", "-q", "pause"])
@@ -800,7 +860,7 @@ def play_pause_callback(channel):
 				mpc_lock.release();
 			set_display_scrolling(False)
 		else:
-			my_print(u'Play Button gedrückt')
+			my_print(u'>> \"Play Knopf\" gedrückt')
 			try:
 				mpc_lock.acquire();
 				subprocess.Popen(["mpc", "-q", "play"])
@@ -808,7 +868,6 @@ def play_pause_callback(channel):
 			finally:
 				mpc_lock.release();
 			set_display_scrolling(True)
-
 		update_display_current(True)
 	finally:
 		button_callback_lock.release()
@@ -818,16 +877,15 @@ def play_pause_callback(channel):
 def next_callback(channel):
 	try:
 		button_callback_lock.acquire()
+
 		global prev_callback_next
-		stored = prev_callback_next
-		now = time.time()
-		prev_callback_next = now
-		if stored + button_press_sleep_time > now:
-			return
+		if not proceed_handling(prev_callback_next, button_press_sleep_time):
+			return 	
+		prev_callback_next = time.time()
 
 		global button_press_sequence
 		global playing
-		my_print(u'Nächster Button gedrückt')
+		my_print(u'>> \"Nächster Knopf\" gedrückt')
 		button_press_sequence += [NEXT]
 		if matching_sequence_found():
 			return
@@ -850,20 +908,18 @@ def prev_callback(channel):
 
 	try:
 		button_callback_lock.acquire()
+
 		global prev_callback_prev
-		stored = prev_callback_prev
-		now = time.time()
-		prev_callback_prev = now
-		if stored + button_press_sleep_time > now:
-			return
+		if not proceed_handling(prev_callback_prev, button_press_sleep_time):
+			return 	
+
+		prev_callback_prev = time.time()
 
 		global button_press_sequence
 		global playing
-		my_print(u'Vorheriger Button gedrückt')
 		button_press_sequence += [PREV]
 		if matching_sequence_found():
 			return
-
 		try:
 			mpc_lock.acquire();
 			subprocess.Popen(["mpc", "-q", "prev"])
@@ -880,17 +936,18 @@ def prev_callback(channel):
 
 def volume_up_callback(channel):
 
+	# TODO what is this for?
  	if GPIO.input(channel):
  		return
+
+	# TODO why no locking?
 	global prev_callback_volume_up
-	stored = prev_callback_volume_up
-	now = time.time()
-	prev_callback_volume_up = now
-	if stored + volume_button_press_sleep_time > now:
-		return
+	if not proceed_handling(prev_callback_volume_up, volume_button_press_sleep_time):
+		return 	
+	prev_callback_volume_up = time.time()
 
 	global button_press_sequence
-	my_print(u'Lautstärke erhöhen Button gedrückt')
+	my_print(u'>> \"Lautstärke erhöhen Knopf\" gedrückt')
 	button_press_sequence += [VOLUME_UP]
 	if matching_sequence_found():
 		return
@@ -903,16 +960,14 @@ def volume_down_callback(channel):
 
  	if GPIO.input(channel):
  		return
+
 	global prev_callback_volume_down
-	stored = prev_callback_volume_down
-	now = time.time()
-	prev_callback_volume_down = now
-	mysum = stored + volume_button_press_sleep_time
-	if mysum > now:
-		return
+	if not proceed_handling(prev_callback_volume_down, volume_button_press_sleep_time):
+		return 	
+	prev_callback_volume_down = time.time()
 
 	global button_press_sequence
-	my_print(u'Lautstärke verringern Button gedrückt')
+	my_print(u'>> \"Lautstärke verringern Knopf\" gedrückt')
 	button_press_sequence += [VOLUME_DOWN]
 	if matching_sequence_found():
 		return
@@ -924,29 +979,38 @@ def volume_down_callback(channel):
 ########################################################################
 
 # define button callbacks
-GPIO.add_event_detect(gpio_play_pause,GPIO.RISING, play_pause_callback)
-GPIO.add_event_detect(gpio_next,GPIO.RISING, next_callback)
-GPIO.add_event_detect(gpio_prev,GPIO.RISING, prev_callback)
-GPIO.add_event_detect(gpio_volume_up,GPIO.RISING, volume_up_callback)
-GPIO.add_event_detect(gpio_volume_down,GPIO.RISING, volume_down_callback)
+bounce_time = 200
+GPIO.add_event_detect(gpio_play_pause,GPIO.RISING, callback=play_pause_callback, bouncetime=bounce_time)
+GPIO.add_event_detect(gpio_next,GPIO.RISING, callback=next_callback, bouncetime=bounce_time)
+GPIO.add_event_detect(gpio_prev,GPIO.RISING, callback=prev_callback, bouncetime=bounce_time)
+GPIO.add_event_detect(gpio_volume_up,GPIO.RISING, callback=volume_up_callback, bouncetime=bounce_time)
+GPIO.add_event_detect(gpio_volume_down,GPIO.RISING, callback=volume_down_callback, bouncetime=bounce_time)
 
 # load library
 load_library()
-# print_library()
+print_library()
 
 # initialize audio player
-mpc_lock.acquire();
+mpc_lock.acquire()
+my_print("Initialisiere mpc...")
 subprocess.Popen(["mpc", "-q", "stop"]) # just in case mpc is currently running
-subprocess.Popen(["mpc", "-q", "volume", "80"]) # decrease initial volume
+subprocess.Popen(["mpc", "-q", "volume", initial_volume])
 subprocess.Popen(["mpc", "clear"])
 subprocess.Popen(["mpc", "update"])
 subprocess.Popen(["mpc", "add", media_dir+media_directories[media_current_dir_index]])
 subprocess.Popen(["mpc", "repeat", "on"])
-mpc_lock.release();
+mpc_lock.release()
 
 # start display thread (only if scrolling is enabled)
 display_thread = Thread(target=display_thread_callback)
 display_thread.start()
+
+# show the IP address after startup for show_ip_time_ms seconds (if already connected)
+if show_ip_address_on_startup:
+	ip_address = get_ip_address()
+	if ip_address != no_ip_text: 
+		display_short_message("IP Adresse:", get_ip_address(), show_ip_time_ms)
+
 trigger_display_event()
 
 # start RFID thread
@@ -960,7 +1024,8 @@ title_changed_observer_thread = Thread(target=title_changed_observer_callback)
 title_changed_observer_thread.start()
 
 # play startup sound
-subprocess.Popen(["mpg123", "-q", startup_sound])
+if play_startup_sound:
+	subprocess.Popen(["mpg123", "-q", startup_sound])
 
 try:
 	time.sleep(99999999999)

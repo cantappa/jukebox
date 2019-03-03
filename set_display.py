@@ -33,7 +33,7 @@ def write_to_lcd(lcd, framebuffer):
 
 # create lcd object
 options = {}
-lcd = i2c.CharLCD('PCF8574', 0x3f, port=1, charmap='A00', cols=16, rows=2, expander_params=options)
+lcd = i2c.CharLCD('PCF8574', 0x27, port=1, charmap='A00', cols=16, rows=2, expander_params=options)
 
 write_to_lcd(lcd, framebuffer)
 
