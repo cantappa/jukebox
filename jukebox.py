@@ -68,18 +68,19 @@ this_script_dir = sys.path[0]+"/"
 library_file = this_script_dir+"library.json"
 
 # directory containing the "tag-*" directories which in turn contain the audio files
-# NOTE: /etc/mpd.conf should contain 'music_directory "/home/pi/Jukebox/Media"'
-media_dir = "/home/pi/Jukebox/Media/"
+# NOTE: /etc/mpd.conf should contain 'music_directory "/home/pi/Jukebox/media"'
+media_dir = "/home/pi/Jukebox/media/"
+suonds_dir = media_dir+"sounds"
 
 # will be filled with contents from JSON library
-media_directories = [] # example: ["/home/pi/Jukebox/Media/tag-01", "/home/pi/Jukebox/Media/tag-02"]
+media_directories = [] # example: ["/home/pi/Jukebox/media/tag-01", "/home/pi/Jukebox/media/tag-02"]
 media_titles = {}      # example: {"tag-01" : "Kitafrösche", "tag-02" : "Bobo"}
 uid_to_tag = {}        # example: { "176,223,243,121" : "tag-01", "64,128,53,131" : "tag-02"}
 
 # sounds
-ping_sound = this_script_dir+"ping.mp3"				# sound to play when a registered RFID card is recognized 
+ping_sound = suonds_dir+"ping.mp3"				# sound to play when a registered RFID card is recognized 
 													# or a hidden button sequence is pressed	
-# startup_sound = this_script_dir+"hallo_paula.mp3"	# sound to play when Jukebox is successfully started and ready for interaction
+# startup_sound = suonds_dir+"hallo_paula.mp3"	# sound to play when Jukebox is successfully started and ready for interaction
 startup_sound = ping_sound
 play_startup_sound = True 							# whether to play the startup sound right after boot
 
