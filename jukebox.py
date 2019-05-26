@@ -83,6 +83,10 @@ ping_sound = this_script_dir+"ping.mp3"				# sound to play when a registered RFI
 startup_sound = ping_sound
 play_startup_sound = True 							# whether to play the startup sound right after boot
 
+initial_volume = "90"	# mpc percentage of initial volume
+mpc_begin_volume = 50		# if the mpc volume is 50% display a volume of 0% at the LCD
+scale_volume = 100/(100-mpc_begin_volume)
+
 # display status
 PAUSE=1
 UNPAUSE=0
@@ -100,8 +104,9 @@ button_press_sequence = []
 # button press sequences for hidden options,
 # note that the sequences may not overlap
 sequence_next_dir = [PREV, PLAY_PAUSE, PLAY_PAUSE, NEXT] 			# sequence for switching to next directory
-sequence_display = [VOLUME_DOWN, VOLUME_UP, VOLUME_DOWN, VOLUME_UP]	# sequence for disabling/enabling display
+sequence_display = [VOLUME_DOWN, PREV, PLAY_PAUSE, VOLUME_UP]		# sequence for disabling/enabling display
 sequence_ip = [PREV, PREV, PREV, PREV, PREV]      					# show the IP address on the display
+back_to_initial_volume = [VOLUME_DOWN, VOLUME_UP, VOLUME_DOWN, VOLUME_UP] # set volume to initial volume
 
 # current (and initial) start media directory 
 media_current_dir_index = 0
@@ -211,7 +216,6 @@ show_previous_timestamp = -1				# if set to a positive number, display the conte
 print_library = False		# print library contents at the beginning to console
 print_button_info = True	# print pressed button to console
 debug_output = True			# whether to enable/disable debug output
-initial_volume = "100" 		# percentage of initial volume
 
 display_previous_scrolling_status = display_scrolling_enabled
 
@@ -362,8 +366,24 @@ def set_display_scrolling(value):
 
 # get current volume
 def get_current_volume():
+
 	cmd = "mpc | grep 'volume:' | awk -F'%' '{print $1}' | awk -F':' '{print $2}' | tr -d '[:space:]'"
-	return subprocess.check_output(cmd, shell=True)
+	mpc_volume = int(subprocess.check_output(cmd, shell=True))
+	return mpc_volume
+
+	# TODO: use own scale
+	# define initiale_volume (mpc scale) to be 100%
+	# and 50% (mpc scale) to be 0%
+	
+	# volume_zero_shift = 60
+	# volume_factor = round(100/(100-volume_zero_shift))
+	# jukebox_volume = round((mpc_volume - volume_zero_shift)*volume_factor)
+
+	# my_print("mpc volume: "+str(mpc_volume))
+	# my_print("jukebox_volume volume: "+str(jukebox_volume))
+	# my_print("factor: "+str(volume_factor))
+
+	# return str(jukebox_volume)
 
 # clear the contents of display_current
 # NOTE: this method may only be called if the display lock is already acquired
@@ -478,8 +498,11 @@ def handle_volume_button_press(text, up):
 	if not enable_volume_info_output:
 		return
 
-	# display new volume at display
-	display_short_message(text, u'Lautstärke: '+str(new_volume)+'%', show_volume_change_time_ms)
+	# transform the mpc volume to the displayed volume display the new scaled volume
+	display_volume = (new_volume - mpc_begin_volume)*scale_volume
+	print "mpc volume: "+str(new_volume)
+	print "display volume: "+str(display_volume)
+	display_short_message(text, u'Lautstärke: '+str(display_volume)+'%', show_volume_change_time_ms)
 	
 
 # check whether to show the previous display contents again
@@ -936,7 +959,7 @@ def prev_callback(channel):
 
 def volume_up_callback(channel):
 
-	# TODO what is this for?
+	# TODO what was this for?
  	if GPIO.input(channel):
  		return
 
@@ -979,12 +1002,13 @@ def volume_down_callback(channel):
 ########################################################################
 
 # define button callbacks
-bounce_time = 200
+bounce_time = 1000
+bounce_time_volume_button = 400
 GPIO.add_event_detect(gpio_play_pause,GPIO.RISING, callback=play_pause_callback, bouncetime=bounce_time)
 GPIO.add_event_detect(gpio_next,GPIO.RISING, callback=next_callback, bouncetime=bounce_time)
 GPIO.add_event_detect(gpio_prev,GPIO.RISING, callback=prev_callback, bouncetime=bounce_time)
-GPIO.add_event_detect(gpio_volume_up,GPIO.RISING, callback=volume_up_callback, bouncetime=bounce_time)
-GPIO.add_event_detect(gpio_volume_down,GPIO.RISING, callback=volume_down_callback, bouncetime=bounce_time)
+GPIO.add_event_detect(gpio_volume_up,GPIO.RISING, callback=volume_up_callback, bouncetime=bounce_time_volume_button)
+GPIO.add_event_detect(gpio_volume_down,GPIO.RISING, callback=volume_down_callback, bouncetime=bounce_time_volume_button)
 
 # load library
 load_library()
