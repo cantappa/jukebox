@@ -372,20 +372,6 @@ def get_current_volume():
 	mpc_volume = int(subprocess.check_output(cmd, shell=True))
 	return mpc_volume
 
-	# TODO: use own scale
-	# define initiale_volume (mpc scale) to be 100%
-	# and 50% (mpc scale) to be 0%
-	
-	# volume_zero_shift = 60
-	# volume_factor = round(100/(100-volume_zero_shift))
-	# jukebox_volume = round((mpc_volume - volume_zero_shift)*volume_factor)
-
-	# my_print("mpc volume: "+str(mpc_volume))
-	# my_print("jukebox_volume volume: "+str(jukebox_volume))
-	# my_print("factor: "+str(volume_factor))
-
-	# return str(jukebox_volume)
-
 # clear the contents of display_current
 # NOTE: this method may only be called if the display lock is already acquired
 def clear_display_current():
@@ -499,10 +485,8 @@ def handle_volume_button_press(text, up):
 	if not enable_volume_info_output:
 		return
 
-	# transform the mpc volume to the displayed volume display the new scaled volume
+	# display own scale of volume instead of the direct mpc volume
 	display_volume = (new_volume - mpc_begin_volume)*scale_volume
-	print "mpc volume: "+str(new_volume)
-	print "display volume: "+str(display_volume)
 	display_short_message(text, u'Lautstärke: '+str(display_volume)+'%', show_volume_change_time_ms)
 	
 
@@ -566,6 +550,7 @@ def update_display_current(update_display_title):
 		display_current_lock.release()
 	set_display_thread_paused(UNPAUSE)
 	trigger_display_event() # fire event for waking up display thread
+
 	# Store the currently running track in order to periodically update it with mpc current.
 	# This is required since the track may change by itself without a button press happening.
 	# This in turn happens if a track is finished and automatically the next one in the 
@@ -960,7 +945,6 @@ def prev_callback(channel):
 
 def volume_up_callback(channel):
 
-	# TODO what was this for?
  	if GPIO.input(channel):
  		return
 
